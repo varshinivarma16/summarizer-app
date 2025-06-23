@@ -3,14 +3,15 @@ from transformers import pipeline
 import fitz  # PyMuPDF
 import docx
 import io
+import gc
 
 # App title
-st.title("📚 Study Buddy: Smart Summarizer + Flashcards + Quiz")
+st.title("📚 Study Buddy: Summarizer + Flashcards + Quiz")
 
 # File uploader
 uploaded_file = st.file_uploader("Upload your PDF, DOCX, or TXT file", type=["pdf", "docx", "txt"])
 
-# Extract text functions
+# Text extractors
 def extract_text_from_pdf(file):
     doc = fitz.open(stream=file.read(), filetype="pdf")
     return "".join([page.get_text() for page in doc])
@@ -22,10 +23,10 @@ def extract_text_from_docx(file):
 def extract_text_from_txt(file):
     return file.read().decode("utf-8")
 
-# Model loading with caching
+# Cached model loaders
 @st.cache_resource
 def load_summarizer():
-    return pipeline("summarization", model="facebook/bart-large-cnn")
+    return pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")  # lighter than bart-large-cnn
 
 @st.cache_resource
 def load_flashcard_gen():
@@ -37,10 +38,9 @@ flashcard_gen = load_flashcard_gen()
 def words_to_tokens(words):
     return int(words * 1.3)
 
-# After upload
+# Main logic
 if uploaded_file:
     file_ext = uploaded_file.name.split(".")[-1].lower()
-
     if file_ext == "pdf":
         text = extract_text_from_pdf(uploaded_file)
     elif file_ext == "docx":
@@ -54,7 +54,7 @@ if uploaded_file:
     st.success(f"✅ Extracted {len(text.split())} words.")
     st.text_area("📝 Preview of text:", value=text[:1000], height=200)
 
-    # Controls
+    # UI Controls
     desired_words = st.slider("Summary length (words)", min_value=50, max_value=280, value=150, step=10)
     num_flashcards = st.slider("Number of flashcards", min_value=1, max_value=10, value=3)
     generate_quiz = st.checkbox("Generate quiz?")
@@ -65,14 +65,16 @@ if uploaded_file:
         min_len = int(max_len / 3)
         st.info(f"Summarizing with max_length={max_len}, min_length={min_len}")
 
-        # Split text
-        chunks = [text[i:i + 1000] for i in range(0, len(text), 1000)]
+        # Summarize
+        chunks = [text[i:i + 800] for i in range(0, len(text), 800)]  # Reduced chunk size for memory
         final_summary = ""
 
         for chunk in chunks:
             try:
                 summary_part = summarizer(chunk, max_length=max_len, min_length=min_len, do_sample=False)[0]['summary_text']
                 final_summary += summary_part + " "
+                del summary_part, chunk
+                gc.collect()
             except Exception as e:
                 st.warning(f"Skipping chunk due to error: {e}")
 
@@ -81,13 +83,16 @@ if uploaded_file:
 
         # Flashcards
         st.subheader("🃏 Flashcards")
-        short_chunks = [text[i:i+300] for i in range(0, len(text), 300)]
+        short_chunks = [text[i:i + 300] for i in range(0, len(text), 300)]
         flashcards = []
+
         for chunk in short_chunks[:num_flashcards]:
             try:
                 card = flashcard_gen(f"Generate a flashcard from: {chunk}", max_length=64, do_sample=False)[0]['generated_text']
                 flashcards.append(card)
                 st.markdown(f"- {card}")
+                del card, chunk
+                gc.collect()
             except Exception as e:
                 st.warning(f"Error generating flashcard: {e}")
 
@@ -100,10 +105,12 @@ if uploaded_file:
                     question = flashcard_gen(f"Generate a quiz question from: {chunk}", max_length=64, do_sample=False)[0]['generated_text']
                     quiz_questions.append(question)
                     st.markdown(f"- {question}")
+                    del question, chunk
+                    gc.collect()
                 except Exception as e:
                     st.warning(f"Error generating quiz question: {e}")
 
-        # Save to .txt
+        # Save as .txt
         study_pack = f"📘 Summary\n\n{final_summary.strip()}\n\n🃏 Flashcards\n\n"
         study_pack += "\n".join([f"{i+1}. {fc}" for i, fc in enumerate(flashcards)])
         if generate_quiz:
